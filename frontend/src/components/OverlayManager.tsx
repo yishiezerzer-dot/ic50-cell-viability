@@ -1,0 +1,184 @@
+import { useCallback, useEffect, useState } from "react";
+import {
+  calculateViability,
+  DEFAULT_DILUTION,
+  DEFAULT_PLOT_SETTINGS,
+  DEFAULT_STYLE_PRESETS,
+  fitIc50,
+} from "../api/client";
+import CompoundConfig, { AddCompoundPicker, type BlockWithSource } from "./CompoundConfig";
+import DataTable, { exportCsv } from "./DataTable";
+import FileUpload, { BlockSummary } from "./FileUpload";
+import PlotPanel from "./PlotPanel";
+import type { Block, CompoundSeries, ParseResult, PlotSettings } from "../types";
+
+let seriesCounter = 0;
+
+function makeSeries(block: Block, fileName: string, styleIndex: number): CompoundSeries {
+  seriesCounter += 1;
+  return {
+    id: `series_${seriesCounter}`,
+    sourceFileName: fileName,
+    block,
+    compound_name: block.compound_name,
+    mw: 500,
+    selected_row_ids: block.replicates.map((r) => r.row_id),
+    dilution: { ...DEFAULT_DILUTION, n_doses: block.n_doses || DEFAULT_DILUTION.n_doses },
+    excluded_dose_indices: [],
+    style: { ...DEFAULT_STYLE_PRESETS[styleIndex % DEFAULT_STYLE_PRESETS.length] },
+    dose_points: [],
+    fit_result: null,
+  };
+}
+
+export default function OverlayManager() {
+  const [parseResults, setParseResults] = useState<{ result: ParseResult; fileName: string }[]>([]);
+  const [seriesList, setSeriesList] = useState<CompoundSeries[]>([]);
+  const [plotSettings, setPlotSettings] = useState<PlotSettings>(DEFAULT_PLOT_SETTINGS);
+  const [recalcError, setRecalcError] = useState<string | null>(null);
+
+  const allBlocks: BlockWithSource[] = parseResults.flatMap((p) =>
+    p.result.blocks.map((block) => ({ block, fileName: p.fileName })),
+  );
+
+  const addedKeys = new Set(seriesList.map((s) => `${s.sourceFileName}:${s.block.block_id}`));
+
+  const recalcSeries = useCallback(async (series: CompoundSeries): Promise<CompoundSeries> => {
+    const viability = await calculateViability(
+      series.block,
+      series.selected_row_ids,
+      series.mw,
+      series.dilution,
+      series.excluded_dose_indices,
+    );
+    const fit = await fitIc50(viability.dose_points);
+    return {
+      ...series,
+      compound_name: series.compound_name,
+      dose_points: viability.dose_points,
+      fit_result: fit,
+    };
+  }, []);
+
+  const updateSeriesStyle = useCallback((updated: CompoundSeries) => {
+    setSeriesList((list) => list.map((s) => (s.id === updated.id ? updated : s)));
+  }, []);
+
+  const updateSeries = useCallback(
+    async (updated: CompoundSeries) => {
+      try {
+        setRecalcError(null);
+        const recalculated = await recalcSeries(updated);
+        setSeriesList((list) => list.map((s) => (s.id === recalculated.id ? recalculated : s)));
+      } catch (e) {
+        setRecalcError(e instanceof Error ? e.message : "Recalculation failed");
+      }
+    },
+    [recalcSeries],
+  );
+
+  const handleParsed = useCallback(
+    async (result: ParseResult, fileName: string) => {
+      setParseResults((prev) => [...prev, { result, fileName }]);
+      if (result.blocks.length > 0) {
+        const first = makeSeries(result.blocks[0], fileName, seriesList.length);
+        try {
+          const recalculated = await recalcSeries(first);
+          setSeriesList((prev) => [...prev, recalculated]);
+        } catch (e) {
+          setRecalcError(e instanceof Error ? e.message : "Calculation failed");
+        }
+      }
+    },
+    [recalcSeries, seriesList.length],
+  );
+
+  const addBlock = async (block: Block, fileName: string) => {
+    const s = makeSeries(block, fileName, seriesList.length);
+    try {
+      const recalculated = await recalcSeries(s);
+      setSeriesList((prev) => [...prev, recalculated]);
+    } catch (e) {
+      setRecalcError(e instanceof Error ? e.message : "Calculation failed");
+    }
+  };
+
+  const toggleExclude = (seriesId: string, doseIndex: number) => {
+    const s = seriesList.find((x) => x.id === seriesId);
+    if (!s) return;
+    const excluded = s.excluded_dose_indices.includes(doseIndex)
+      ? s.excluded_dose_indices.filter((i) => i !== doseIndex)
+      : [...s.excluded_dose_indices, doseIndex];
+    updateSeries({ ...s, excluded_dose_indices: excluded });
+  };
+
+  // Debounced recalc when series config changes from CompoundConfig
+  useEffect(() => {
+    // handled via updateSeries on each change
+  }, []);
+
+  return (
+    <div className="app-layout">
+      <header>
+        <h1>IC50 Cell Viability Platform</h1>
+        <p>Upload Tecan Spark MTT exports, select replicates, exclude outliers, and overlay dose-response curves.</p>
+      </header>
+
+      <FileUpload onParsed={handleParsed} />
+
+      {parseResults.map((p, i) => (
+        <BlockSummary key={`${p.fileName}-${i}`} blocks={p.result.blocks} />
+      ))}
+
+      {recalcError && <p className="error banner">{recalcError}</p>}
+
+      <section className="section">
+        <h2>2. Configure compounds</h2>
+        {seriesList.map((s) => (
+          <CompoundConfig
+            key={s.id}
+            series={s}
+            onChange={updateSeries}
+            onStyleChange={updateSeriesStyle}
+            onRemove={seriesList.length > 1 ? () => setSeriesList((prev) => prev.filter((x) => x.id !== s.id)) : undefined}
+          />
+        ))}
+
+        {allBlocks.length > 0 && (
+          <AddCompoundPicker
+            blocks={allBlocks}
+            addedKeys={addedKeys}
+            onAdd={(item) => addBlock(item.block, item.fileName)}
+          />
+        )}
+
+        <div className="card">
+          <h3>Overlay from another file</h3>
+          <p className="muted">Upload another Spark export below to overlay compounds from a different experiment.</p>
+          <FileUpload
+            onParsed={async (result, fileName) => {
+              setParseResults((prev) => [...prev, { result, fileName }]);
+              if (result.blocks.length > 0) {
+                await addBlock(result.blocks[0], fileName);
+              }
+            }}
+          />
+        </div>
+      </section>
+
+      {seriesList.length > 0 && (
+        <section className="section">
+          <h2>3. Review data & exclude points</h2>
+          {seriesList.map((s) => (
+            <DataTable key={s.id} series={s} onToggleExclude={(doseIndex) => toggleExclude(s.id, doseIndex)} />
+          ))}
+          <button type="button" className="btn secondary" onClick={() => exportCsv(seriesList)}>
+            Export CSV
+          </button>
+        </section>
+      )}
+
+      <PlotPanel seriesList={seriesList} plotSettings={plotSettings} onPlotSettingsChange={setPlotSettings} />
+    </div>
+  );
+}
