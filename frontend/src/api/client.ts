@@ -11,6 +11,23 @@ import type {
 
 const API_BASE = "";
 
+export function formatApiError(payload: unknown, fallback: string): string {
+  if (!payload || typeof payload !== "object") return fallback;
+  const detail = (payload as { detail?: unknown }).detail;
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    return detail
+      .map((item) => {
+        if (typeof item === "object" && item && "msg" in item) {
+          return String((item as { msg: unknown }).msg);
+        }
+        return JSON.stringify(item);
+      })
+      .join("; ");
+  }
+  return fallback;
+}
+
 async function postJson<T>(url: string, body: unknown): Promise<T> {
   const res = await fetch(`${API_BASE}${url}`, {
     method: "POST",
@@ -18,19 +35,23 @@ async function postJson<T>(url: string, body: unknown): Promise<T> {
     body: JSON.stringify(body),
   });
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(err.detail || "Request failed");
+    const err = await res.json().catch(() => null);
+    throw new Error(formatApiError(err, `Request failed (${res.status})`));
   }
   return res.json();
 }
 
 export async function parseFile(file: File): Promise<ParseResult> {
+  if (file.name.toLowerCase().endsWith(".xls") && !file.name.toLowerCase().endsWith(".xlsx")) {
+    throw new Error("Old .xls format is not supported. In Spark, re-export the plate as .xlsx.");
+  }
+
   const form = new FormData();
   form.append("file", file);
   const res = await fetch(`${API_BASE}/api/parse`, { method: "POST", body: form });
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(err.detail || "Parse failed");
+    const err = await res.json().catch(() => null);
+    throw new Error(formatApiError(err, `Parse failed (${res.status} ${res.statusText})`));
   }
   return res.json();
 }

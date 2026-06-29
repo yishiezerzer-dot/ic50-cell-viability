@@ -40,7 +40,10 @@ async def parse_file(file: UploadFile = File(...)):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Failed to parse file: {exc}") from exc
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to parse file: {type(exc).__name__}: {exc}",
+        ) from exc
 
 
 @app.post("/api/calculate")
