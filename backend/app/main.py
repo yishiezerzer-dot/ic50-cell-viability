@@ -65,7 +65,8 @@ def calculate(request: CalculateRequest):
 
 @app.post("/api/fit")
 def fit(request: FitRequest):
-    return fit_ic50(request.dose_points)
+    n_bootstrap = min(max(request.n_bootstrap, 0), 200)
+    return fit_ic50(request.dose_points, n_bootstrap=n_bootstrap)
 
 
 @app.post("/api/plot-data")

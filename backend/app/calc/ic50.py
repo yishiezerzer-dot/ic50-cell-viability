@@ -1,10 +1,13 @@
 """4-parameter logistic dose-response fit and IC50 estimation."""
 
+import os
 import warnings
 from typing import Any
 
 import numpy as np
 from scipy.optimize import curve_fit
+
+DEFAULT_BOOTSTRAP = int(os.environ.get("IC50_BOOTSTRAP_N", "30"))
 
 
 def four_pl(x: np.ndarray, top: float, bottom: float, ic50: float, hill: float) -> np.ndarray:
@@ -15,7 +18,12 @@ def four_pl(x: np.ndarray, top: float, bottom: float, ic50: float, hill: float) 
         return bottom + (top - bottom) / (1.0 + ratio)
 
 
-def _fit_4pl(concentrations_um: np.ndarray, viabilities: np.ndarray) -> dict[str, Any] | None:
+def _fit_4pl(
+    concentrations_um: np.ndarray,
+    viabilities: np.ndarray,
+    *,
+    maxfev: int = 5000,
+) -> dict[str, Any] | None:
     """Fit 4PL on linear µM concentrations."""
     if len(concentrations_um) < 4:
         return None
@@ -47,7 +55,7 @@ def _fit_4pl(concentrations_um: np.ndarray, viabilities: np.ndarray) -> dict[str
                 y,
                 p0=[top_guess, bottom_guess, ic50_guess, hill_guess],
                 bounds=bounds,
-                maxfev=20000,
+                maxfev=maxfev,
             )
     except (RuntimeError, ValueError):
         return None
@@ -68,7 +76,7 @@ def _fit_4pl(concentrations_um: np.ndarray, viabilities: np.ndarray) -> dict[str
 
 def _bootstrap_ic50(
     dose_points: list[dict[str, Any]],
-    n_bootstrap: int = 200,
+    n_bootstrap: int = DEFAULT_BOOTSTRAP,
 ) -> tuple[float | None, float | None]:
     """Bootstrap IC50 SE from replicate-level data."""
     pool_x: list[float] = []
@@ -103,11 +111,11 @@ def _bootstrap_ic50(
         cy = np.array([np.mean(v) for v in conc_map.values()])
         if len(cx) < 4:
             continue
-        fit = _fit_4pl(cx, cy)
+        fit = _fit_4pl(cx, cy, maxfev=2000)
         if fit and fit["ic50"] > 0:
             ic50_samples.append(fit["ic50"])
 
-    if len(ic50_samples) < 10:
+    if len(ic50_samples) < 5:
         return None, None
 
     return float(np.median(ic50_samples)), float(np.std(ic50_samples))
@@ -121,7 +129,7 @@ def generate_curve_points(fit: dict[str, Any], x_min: float, x_max: float, n: in
     return [{"um": float(x), "viability": float(y)} for x, y in zip(x_vals, y_vals)]
 
 
-def fit_ic50(dose_points: list[dict[str, Any]], n_bootstrap: int = 200) -> dict[str, Any]:
+def fit_ic50(dose_points: list[dict[str, Any]], n_bootstrap: int = DEFAULT_BOOTSTRAP) -> dict[str, Any]:
     """
     Fit 4PL to aggregated dose points and compute IC50 ± SE.
 

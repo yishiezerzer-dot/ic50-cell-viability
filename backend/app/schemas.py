@@ -21,6 +21,7 @@ class CalculateRequest(BaseModel):
 
 class FitRequest(BaseModel):
     dose_points: list[dict[str, Any]]
+    n_bootstrap: int = 30
 
 
 class SeriesStyle(BaseModel):

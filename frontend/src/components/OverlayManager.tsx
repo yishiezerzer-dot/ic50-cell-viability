@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import {
   calculateViability,
   DEFAULT_DILUTION,
@@ -36,6 +36,7 @@ export default function OverlayManager() {
   const [seriesList, setSeriesList] = useState<CompoundSeries[]>([]);
   const [plotSettings, setPlotSettings] = useState<PlotSettings>(DEFAULT_PLOT_SETTINGS);
   const [recalcError, setRecalcError] = useState<string | null>(null);
+  const [fittingIds, setFittingIds] = useState<Set<string>>(new Set());
 
   const allBlocks: BlockWithSource[] = parseResults.flatMap((p) =>
     p.result.blocks.map((block) => ({ block, fileName: p.fileName })),
@@ -43,22 +44,57 @@ export default function OverlayManager() {
 
   const addedKeys = new Set(seriesList.map((s) => `${s.sourceFileName}:${s.block.block_id}`));
 
-  const recalcSeries = useCallback(async (series: CompoundSeries): Promise<CompoundSeries> => {
-    const viability = await calculateViability(
-      series.block,
-      series.selected_row_ids,
-      series.mw,
-      series.dilution,
-      series.excluded_dose_indices,
-    );
-    const fit = await fitIc50(viability.dose_points);
-    return {
-      ...series,
-      compound_name: series.compound_name,
-      dose_points: viability.dose_points,
-      fit_result: fit,
-    };
+  const runFit = useCallback(async (seriesId: string, dosePoints: CompoundSeries["dose_points"]) => {
+    setFittingIds((prev) => new Set(prev).add(seriesId));
+    try {
+      const fit = await fitIc50(dosePoints);
+      setSeriesList((list) => list.map((s) => (s.id === seriesId ? { ...s, fit_result: fit } : s)));
+    } catch (e) {
+      setRecalcError(e instanceof Error ? e.message : "IC50 fit failed");
+      setSeriesList((list) =>
+        list.map((s) =>
+          s.id === seriesId
+            ? {
+                ...s,
+                fit_result: {
+                  success: false,
+                  message: e instanceof Error ? e.message : "IC50 fit failed",
+                  ic50: null,
+                  ic50_se: null,
+                  curve_points: [],
+                },
+              }
+            : s,
+        ),
+      );
+    } finally {
+      setFittingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(seriesId);
+        return next;
+      });
+    }
   }, []);
+
+  const recalcSeries = useCallback(
+    async (series: CompoundSeries): Promise<CompoundSeries> => {
+      const viability = await calculateViability(
+        series.block,
+        series.selected_row_ids,
+        series.mw,
+        series.dilution,
+        series.excluded_dose_indices,
+      );
+      const withData: CompoundSeries = {
+        ...series,
+        dose_points: viability.dose_points,
+        fit_result: null,
+      };
+      void runFit(series.id, viability.dose_points);
+      return withData;
+    },
+    [runFit],
+  );
 
   const updateSeriesStyle = useCallback((updated: CompoundSeries) => {
     setSeriesList((list) => list.map((s) => (s.id === updated.id ? updated : s)));
@@ -68,8 +104,8 @@ export default function OverlayManager() {
     async (updated: CompoundSeries) => {
       try {
         setRecalcError(null);
-        const recalculated = await recalcSeries(updated);
-        setSeriesList((list) => list.map((s) => (s.id === recalculated.id ? recalculated : s)));
+        const withData = await recalcSeries(updated);
+        setSeriesList((list) => list.map((s) => (s.id === withData.id ? withData : s)));
       } catch (e) {
         setRecalcError(e instanceof Error ? e.message : "Recalculation failed");
       }
@@ -83,8 +119,9 @@ export default function OverlayManager() {
       if (result.blocks.length > 0) {
         const first = makeSeries(result.blocks[0], fileName, seriesList.length);
         try {
-          const recalculated = await recalcSeries(first);
-          setSeriesList((prev) => [...prev, recalculated]);
+          setRecalcError(null);
+          const withData = await recalcSeries(first);
+          setSeriesList((prev) => [...prev, withData]);
         } catch (e) {
           setRecalcError(e instanceof Error ? e.message : "Calculation failed");
         }
@@ -96,8 +133,9 @@ export default function OverlayManager() {
   const addBlock = async (block: Block, fileName: string) => {
     const s = makeSeries(block, fileName, seriesList.length);
     try {
-      const recalculated = await recalcSeries(s);
-      setSeriesList((prev) => [...prev, recalculated]);
+      setRecalcError(null);
+      const withData = await recalcSeries(s);
+      setSeriesList((prev) => [...prev, withData]);
     } catch (e) {
       setRecalcError(e instanceof Error ? e.message : "Calculation failed");
     }
@@ -111,11 +149,6 @@ export default function OverlayManager() {
       : [...s.excluded_dose_indices, doseIndex];
     updateSeries({ ...s, excluded_dose_indices: excluded });
   };
-
-  // Debounced recalc when series config changes from CompoundConfig
-  useEffect(() => {
-    // handled via updateSeries on each change
-  }, []);
 
   return (
     <div className="app-layout">
@@ -131,6 +164,9 @@ export default function OverlayManager() {
       ))}
 
       {recalcError && <p className="error banner">{recalcError}</p>}
+      {fittingIds.size > 0 && (
+        <p className="muted banner">Calculating IC50 fit curve… plot points are shown while this runs.</p>
+      )}
 
       <section className="section">
         <h2>2. Configure compounds</h2>
